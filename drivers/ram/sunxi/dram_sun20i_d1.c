@@ -13,11 +13,11 @@
  */
 
 #ifndef CONFIG_DRAM_CLK
-#define CONFIG_DRAM_CLK 792
+#define CONFIG_DRAM_CLK 0x00000210
 #endif
 
 #ifndef CONFIG_DRAM_ZQ
-#define CONFIG_DRAM_ZQ 0x007b7bfb
+#define CONFIG_DRAM_ZQ 0x007b7bf9
 #endif
 
 #define readl rv_readl
@@ -1361,7 +1361,7 @@ static int init_DRAM(int type, const dram_para_t *para)
 #define PARAMETER_IS_UNUSED 0
 static const dram_para_t para = {
 	.dram_clk	= CONFIG_DRAM_CLK,
-	.dram_type	= CONFIG_SUNXI_DRAM_TYPE,
+	.dram_type	= 2,
 	.dram_zq	= CONFIG_DRAM_ZQ,
 	.dram_odt_en	= CONFIG_DRAM_SUNXI_ODT_EN,
 	.dram_mr0	= PARAMETER_IS_UNUSED,
