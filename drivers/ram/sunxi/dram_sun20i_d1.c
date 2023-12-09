@@ -665,7 +665,7 @@ static void mctl_phy_ac_remapping(const dram_para_t *para,
 	debug("DDR efuse: 0x%x\n", fuse);
 
 	if (para->dram_type == SUNXI_DRAM_TYPE_DDR2) {
-		if (fuse == 15)
+		if (fuse == 10 || fuse == 15)
 			return;
 		cfg = ac_remapping_tables[6];
 	} else {
