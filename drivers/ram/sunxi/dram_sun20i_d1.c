@@ -557,7 +557,7 @@ static void mctl_sys_init(const dram_para_t *para, const dram_config_t *config)
 }
 
 // The main purpose of this routine seems to be to copy an address configuration
-// from the dram_para1 and dram_para2 fields to the PHY configuration registers
+// from the rank_para and dram_para2 fields to the PHY configuration registers
 // (0x3102000, 0x3102004).
 //
 static void mctl_com_init(const dram_para_t *para, const dram_config_t *config)
@@ -595,11 +595,11 @@ static void mctl_com_init(const dram_para_t *para, const dram_config_t *config)
 		val = readl(ptr) & 0xfffff000;
 
 		val |= (config->dram_para2 >> 12) & 0x3; // rank
-		val |= ((config->dram_para1 >> (i + 12)) << 2) & 0x4; // bank - 2
-		val |= (((config->dram_para1 >> (i + 4)) - 1) << 4) & 0xff; // row - 1
+		val |= (config->ranks[i].bank_bits << 2) & 0x4; // bank - 2
+		val |= ((config->ranks[i].row_bits - 1) << 4) & 0xff; // row - 1
 
 		// convert from page size to column addr width - 3
-		switch ((config->dram_para1 >> i) & 0xf) {
+		switch (config->ranks[i].page_size & 0xf) {
 		case 8: val |= 0xa00; break;
 		case 4: val |= 0x900; break;
 		case 2: val |= 0x800; break;
@@ -1034,7 +1034,7 @@ static int mctl_core_init(const dram_para_t *para, const dram_config_t *config)
  * this is tested.
  * Next the BA2 line is checked. This seems to be placed above the column,
  * BA0-1 and row addresses. Finally, the column address is allocated 13 lines
- * and these are tested. The results are placed in dram_para1 and dram_para2.
+ * and these are tested. The results are placed in rank_para and dram_para2.
  */
 
 static uint32_t get_payload(bool odd, unsigned long int ptr)
@@ -1047,8 +1047,7 @@ static uint32_t get_payload(bool odd, unsigned long int ptr)
 
 static int auto_scan_dram_size(const dram_para_t *para, dram_config_t *config)
 {
-	unsigned int rval, i, j, rank, maxrank, offs;
-	unsigned int shft;
+	unsigned int i, j, rank, maxrank, offs;
 	unsigned long ptr, mc_work_mode, chk;
 
 	if (mctl_core_init(para, config) == 0) {
@@ -1085,13 +1084,7 @@ static int auto_scan_dram_size(const dram_para_t *para, dram_config_t *config)
 		if (i > 16)
 			i = 16;
 		debug("rank %d row = %d\n", rank, i);
-
-		/* Store rows in para 1 */
-		shft = offs + 4;
-		rval = config->dram_para1;
-		rval &= ~(0xff << shft);
-		rval |= i << shft;
-		config->dram_para1 = rval;
+		config->ranks[rank].row_bits = i;
 
 		if (rank == 1)		/* Set bank mode for rank0 */
 			clrsetbits_le32(0x3102000, 0xffc, 0x6a4);
@@ -1114,13 +1107,7 @@ static int auto_scan_dram_size(const dram_para_t *para, dram_config_t *config)
 		}
 
 		debug("rank %d bank = %d\n", rank, (j + 1) << 2); /* 4 or 8 */
-
-		/* Store banks in para 1 */
-		shft = 12 + offs;
-		rval = config->dram_para1;
-		rval &= ~(0xf << shft);
-		rval |= j << shft;
-		config->dram_para1 = rval;
+		config->ranks[rank].bank_bits = j;
 
 		if (rank == 1)		/* Set page mode for rank0 */
 			clrsetbits_le32(0x3102000, 0xffc, 0xaa0);
@@ -1148,13 +1135,7 @@ static int auto_scan_dram_size(const dram_para_t *para, dram_config_t *config)
 
 		unsigned int pgsize = (i == 9) ? 0 : (1 << (i - 10));
 		debug("rank %d page size = %d KB\n", rank, pgsize);
-
-		/* Store page size */
-		shft = offs;
-		rval = config->dram_para1;
-		rval &= ~(0xf << shft);
-		rval |= pgsize << shft;
-		config->dram_para1 = rval;
+		config->ranks[rank].page_size = pgsize;
 
 		// Move to next rank
 		rank++;
@@ -1173,8 +1154,9 @@ static int auto_scan_dram_size(const dram_para_t *para, dram_config_t *config)
 	}
 	if (maxrank == 2) {
 		config->dram_para2 &= 0xfffff0ff;
-		/* note: rval is equal to para->dram_para1 here */
-		if ((rval & 0xffff) == (rval >> 16)) {
+		if (config->ranks[0].page_size == config->ranks[1].page_size &&
+		    config->ranks[0].row_bits  == config->ranks[1].row_bits  &&
+		    config->ranks[0].bank_bits == config->ranks[1].bank_bits) {
 			debug("rank1 config same as rank0\n");
 		} else {
 			config->dram_para2 |= BIT(8);
@@ -1195,9 +1177,7 @@ static int auto_scan_dram_rank_width(const dram_para_t *para,
 				     dram_config_t *config)
 {
 	unsigned int s1 = config->dram_tpr13;
-	unsigned int s2 = config->dram_para1;
 
-	config->dram_para1 = 0x00b000b0;
 	config->dram_para2 = (config->dram_para2 & ~0xf) | BIT(12);
 
 	/* set DQS probe mode */
@@ -1212,7 +1192,6 @@ static int auto_scan_dram_rank_width(const dram_para_t *para,
 		return 0;
 
 	config->dram_tpr13 = s1;
-	config->dram_para1 = s2;
 
 	return 1;
 }
@@ -1247,7 +1226,10 @@ static int auto_scan_dram_config(const dram_para_t *para,
 static int init_DRAM(int type, const dram_para_t *para)
 {
 	dram_config_t config = {
-		.dram_para1	= 0x000010d2,
+		.ranks		= {
+			[0] = { .row_bits = 11 },
+			[1] = { .row_bits = 11 },
+		},
 		.dram_para2	= 0,
 		.dram_tpr13	= CONFIG_DRAM_SUNXI_TPR13,
 	};

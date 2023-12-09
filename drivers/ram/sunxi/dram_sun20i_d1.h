@@ -55,9 +55,15 @@ typedef struct dram_para {
 	const u32	dram_tpr12;
 } dram_para_t;
 
+struct rank_para {
+	u16 page_size;
+	u8 row_bits;
+	u8 bank_bits;
+};
+
 typedef struct dram_config {
+	struct rank_para ranks[2];
 	/* control configuration */
-	u32	dram_para1;
 	u32	dram_para2;
 	/* contains a bitfield of DRAM setup settings */
 	u32	dram_tpr13;
