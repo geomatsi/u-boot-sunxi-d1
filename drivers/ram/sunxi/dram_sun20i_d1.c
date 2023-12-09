@@ -1360,23 +1360,24 @@ static int init_DRAM(int type, const dram_para_t *para)
 	return mem_size_mb;
 }
 
+#define PARAMETER_IS_UNUSED 0
 static const dram_para_t para = {
 	.dram_clk	= CONFIG_DRAM_CLK,
 	.dram_type	= CONFIG_SUNXI_DRAM_TYPE,
 	.dram_zq	= CONFIG_DRAM_ZQ,
 	.dram_odt_en	= CONFIG_DRAM_SUNXI_ODT_EN,
-	.dram_mr0	= 0x1c70,
+	.dram_mr0	= PARAMETER_IS_UNUSED,
 	.dram_mr1	= 0x42,
-	.dram_mr2	= 0x18,
+	.dram_mr2	= PARAMETER_IS_UNUSED,
 	.dram_mr3	= 0,
-	.dram_tpr0	= 0x004a2195,
-	.dram_tpr1	= 0x02423190,
-	.dram_tpr2	= 0x0008b061,
-	.dram_tpr3	= 0xb4787896, // unused
+	.dram_tpr0	= PARAMETER_IS_UNUSED,
+	.dram_tpr1	= PARAMETER_IS_UNUSED,
+	.dram_tpr2	= PARAMETER_IS_UNUSED,
+	.dram_tpr3	= PARAMETER_IS_UNUSED,
 	.dram_tpr4	= 0,
 	.dram_tpr5	= 0x48484848,
 	.dram_tpr6	= 0x00000048,
-	.dram_tpr7	= 0x1620121e, // unused
+	.dram_tpr7	= PARAMETER_IS_UNUSED,
 	.dram_tpr8	= 0,
 	.dram_tpr9	= 0, // clock?
 	.dram_tpr10	= 0,
