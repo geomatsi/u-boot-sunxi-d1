@@ -1100,7 +1100,7 @@ static int auto_scan_dram_size(const dram_para_t *para, dram_config_t *config)
 		udelay(1);
 
 		// Test if bit A23 is BA2 or mirror XXX A22?
-		chk = CFG_SYS_SDRAM_BASE + (1U << 22);
+		chk = CFG_SYS_SDRAM_BASE + (1U << 11);
 		ptr = CFG_SYS_SDRAM_BASE;
 		for (i = 0, j = 0; i < 64; i++) {
 			if (readl(chk) != get_payload(i & 1, ptr)) {
