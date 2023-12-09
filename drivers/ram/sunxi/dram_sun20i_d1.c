@@ -14,6 +14,7 @@
 
 #include <asm/io.h>
 #include <config.h>
+#include <cpu_func.h>
 #ifdef CONFIG_RAM
   #include <dm.h>
   #include <ram.h>
@@ -1098,6 +1099,7 @@ static int auto_scan_dram_size(const dram_para_t *para, dram_config_t *config)
 		/* Set bank mode for current rank */
 		clrsetbits_le32(mc_work_mode, 0xffc, 0x6a4);
 		udelay(1);
+		flush_dcache_all();
 
 		// Test if bit A23 is BA2 or mirror XXX A22?
 		chk = CFG_SYS_SDRAM_BASE + (1U << 11);
@@ -1126,6 +1128,7 @@ static int auto_scan_dram_size(const dram_para_t *para, dram_config_t *config)
 		/* Set page mode for current rank */
 		clrsetbits_le32(mc_work_mode, 0xffc, 0xaa0);
 		udelay(1);
+		flush_dcache_all();
 
 		// Scan per address line, until address wraps (i.e. see shadow)
 		for (i = 9; i < 14; i++) {
