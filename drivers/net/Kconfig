@@ -307,6 +307,11 @@ config EEPRO100
 	  This driver supports Intel(R) PRO/100 82557/82559/82559ER fast
 	  ethernet family of adapters.
 
+config ENC28J60
+	bool "ENC28J60 SPI Ethernet support"
+	help
+	  TODO
+
 config ETH_SANDBOX
 	depends on SANDBOX
 	default y

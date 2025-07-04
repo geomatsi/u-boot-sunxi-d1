@@ -39,6 +39,7 @@ int dm9000_initialize(struct bd_info *bis);
 int dnet_eth_initialize(int id, void *regs, unsigned int phy_addr);
 int e1000_initialize(struct bd_info *bis);
 int eepro100_initialize(struct bd_info *bis);
+int enc28j60_initialize(unsigned int bus, unsigned int cs, unsigned int max_hz, unsigned int mode);
 int ep93xx_eth_initialize(u8 dev_num, int base_addr);
 int eth_3com_initialize (struct bd_info * bis);
 int ethoc_initialize(u8 dev_num, int base_addr);
