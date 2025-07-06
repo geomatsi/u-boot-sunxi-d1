@@ -13,6 +13,8 @@
 #include <malloc.h>
 #include <netdev.h>
 #include <miiphy.h>
+#include <linux/delay.h>
+
 #include "enc28j60.h"
 
 /*
@@ -46,15 +48,24 @@
  * we do not need a full, time consuming init including link ready wait.
  * This enum helps to bring the chip through the minimum necessary inits.
  */
-enum enc_initstate {none=0, setupdone, linkready};
-typedef struct enc_device {
-	struct eth_device	*dev;	/* back pointer */
+enum enc_initstate {
+	none=0,
+	setupdone,
+	linkready
+};
+
+struct enc_device {
+	struct udevice		*udev;
 	struct spi_slave	*slave;
 	int			rx_reset_counter;
 	u16			next_pointer;
 	u8			bank;	/* current bank in enc28j60 */
 	enum enc_initstate	initstate;
-} enc_dev_t;
+	const char *name;
+#if defined(CONFIG_CMD_MII)
+	struct mii_dev		*mdio;
+#endif
+};
 
 /*
  * enc_bset:		set bits in a common register
@@ -63,24 +74,24 @@ typedef struct enc_device {
  * making the reg parameter u8 will give a compile time warning if the
  * functions are called with a register not accessible in all Banks
  */
-static void enc_bset(enc_dev_t *enc, const u8 reg, const u8 data)
+static void enc_bset(struct enc_device *enc, const u8 reg, const u8 data)
 {
 	u8 dout[2];
 
 	dout[0] = CMD_BFS(reg);
 	dout[1] = data;
-	spi_xfer(enc->slave, 2 * 8, dout, NULL,
-		SPI_XFER_BEGIN | SPI_XFER_END);
+
+	spi_xfer(enc->slave, 2 * 8, dout, NULL, SPI_XFER_BEGIN | SPI_XFER_END);
 }
 
-static void enc_bclr(enc_dev_t *enc, const u8 reg, const u8 data)
+static void enc_bclr(struct enc_device *enc, const u8 reg, const u8 data)
 {
 	u8 dout[2];
 
 	dout[0] = CMD_BFC(reg);
 	dout[1] = data;
-	spi_xfer(enc->slave, 2 * 8, dout, NULL,
-		SPI_XFER_BEGIN | SPI_XFER_END);
+
+	spi_xfer(enc->slave, 2 * 8, dout, NULL, SPI_XFER_BEGIN | SPI_XFER_END);
 }
 
 /*
@@ -91,7 +102,7 @@ static void enc_bclr(enc_dev_t *enc, const u8 reg, const u8 data)
  * 3: switch to bank 2
  * 4: switch to bank 3
  */
-static void enc_set_bank(enc_dev_t *enc, const u16 reg)
+static void enc_set_bank(struct enc_device *enc, const u16 reg)
 {
 	u8 newbank = reg >> 8;
 
@@ -99,8 +110,7 @@ static void enc_set_bank(enc_dev_t *enc, const u16 reg)
 		return;
 	switch (newbank) {
 	case 1:
-		enc_bclr(enc, CTL_REG_ECON1,
-			ENC_ECON1_BSEL0 | ENC_ECON1_BSEL1);
+		enc_bclr(enc, CTL_REG_ECON1, ENC_ECON1_BSEL0 | ENC_ECON1_BSEL1);
 		break;
 	case 2:
 		enc_bset(enc, CTL_REG_ECON1, ENC_ECON1_BSEL0);
@@ -111,8 +121,7 @@ static void enc_set_bank(enc_dev_t *enc, const u16 reg)
 		enc_bset(enc, CTL_REG_ECON1, ENC_ECON1_BSEL1);
 		break;
 	case 4:
-		enc_bset(enc, CTL_REG_ECON1,
-			ENC_ECON1_BSEL0 | ENC_ECON1_BSEL1);
+		enc_bset(enc, CTL_REG_ECON1, ENC_ECON1_BSEL0 | ENC_ECON1_BSEL1);
 		break;
 	}
 	enc->bank = newbank;
@@ -149,7 +158,7 @@ static int enc_reg2nbytes(const u16 reg)
 /*
  * Read a byte register
  */
-static u8 enc_r8(enc_dev_t *enc, const u16 reg)
+static u8 enc_r8(struct enc_device *enc, const u16 reg)
 {
 	u8 dout[3];
 	u8 din[3];
@@ -166,7 +175,7 @@ static u8 enc_r8(enc_dev_t *enc, const u16 reg)
  * Read a L/H register pair and return a word.
  * Must be called with the L register's address.
  */
-static u16 enc_r16(enc_dev_t *enc, const u16 reg)
+static u16 enc_r16(struct enc_device *enc, const u16 reg)
 {
 	u8 dout[3];
 	u8 din[3];
@@ -188,7 +197,7 @@ static u16 enc_r16(enc_dev_t *enc, const u16 reg)
 /*
  * Write a byte register
  */
-static void enc_w8(enc_dev_t *enc, const u16 reg, const u8 data)
+static void enc_w8(struct enc_device *enc, const u16 reg, const u8 data)
 {
 	u8 dout[2];
 
@@ -203,7 +212,7 @@ static void enc_w8(enc_dev_t *enc, const u16 reg, const u8 data)
  * Write a L/H register pair.
  * Must be called with the L register's address.
  */
-static void enc_w16(enc_dev_t *enc, const u16 reg, const u16 data)
+static void enc_w16(struct enc_device *enc, const u16 reg, const u16 data)
 {
 	u8 dout[2];
 
@@ -221,7 +230,7 @@ static void enc_w16(enc_dev_t *enc, const u16 reg, const u16 data)
 /*
  * Write a byte register, verify and retry
  */
-static void enc_w8_retry(enc_dev_t *enc, const u16 reg, const u8 data, const int c)
+static void enc_w8_retry(struct enc_device *enc, const u16 reg, const u8 data, const int c)
 {
 	u8 dout[2];
 	u8 readback;
@@ -239,22 +248,23 @@ static void enc_w8_retry(enc_dev_t *enc, const u16 reg, const u8 data, const int
 		/* wait 1ms */
 		udelay(1000);
 	}
+
 	if (i == c) {
-		printf("%s: write reg 0x%03x failed\n", enc->dev->name, reg);
+		pr_info("%s (%s): write reg 0x%03x failed\n", __func__, enc->name, reg);
 	}
 }
 
 /*
  * Read ENC RAM into buffer
  */
-static void enc_rbuf(enc_dev_t *enc, const u16 length, u8 *buf)
+static void enc_rbuf(struct enc_device *enc, const u16 length, u8 *buf)
 {
 	u8 dout[1];
 
 	dout[0] = CMD_RBM;
 	spi_xfer(enc->slave, 8, dout, NULL, SPI_XFER_BEGIN);
 	spi_xfer(enc->slave, length * 8, NULL, buf, SPI_XFER_END);
-#ifdef DEBUG
+#if 0
 	puts("Rx:\n");
 	print_buffer(0, buf, 1, length, 0);
 #endif
@@ -263,14 +273,14 @@ static void enc_rbuf(enc_dev_t *enc, const u16 length, u8 *buf)
 /*
  * Write buffer into ENC RAM
  */
-static void enc_wbuf(enc_dev_t *enc, const u16 length, const u8 *buf, const u8 control)
+static void enc_wbuf(struct enc_device *enc, const u16 length, const u8 *buf, const u8 control)
 {
 	u8 dout[2];
 	dout[0] = CMD_WBM;
 	dout[1] = control;
 	spi_xfer(enc->slave, 2 * 8, dout, NULL, SPI_XFER_BEGIN);
 	spi_xfer(enc->slave, length * 8, buf, NULL, SPI_XFER_END);
-#ifdef DEBUG
+#if 0
 	puts("Tx:\n");
 	print_buffer(0, buf, 1, length, 0);
 #endif
@@ -280,11 +290,12 @@ static void enc_wbuf(enc_dev_t *enc, const u16 length, const u8 *buf, const u8 c
  * Try to claim the SPI bus.
  * Print error message on failure.
  */
-static int enc_claim_bus(enc_dev_t *enc)
+static int enc_claim_bus(struct enc_device *enc)
 {
 	int rc = spi_claim_bus(enc->slave);
 	if (rc)
-		printf("%s: failed to claim SPI bus\n", enc->dev->name);
+		pr_err("%s (%s): failed to claim SPI bus\n", __func__, enc->name);
+
 	return rc;
 }
 
@@ -293,7 +304,7 @@ static int enc_claim_bus(enc_dev_t *enc)
  * This function is mainly for symmetry to enc_claim_bus().
  * Let the toolchain decide to inline it...
  */
-static void enc_release_bus(enc_dev_t *enc)
+static void enc_release_bus(struct enc_device *enc)
 {
 	spi_release_bus(enc->slave);
 }
@@ -301,24 +312,27 @@ static void enc_release_bus(enc_dev_t *enc)
 /*
  * Read PHY register
  */
-static u16 enc_phy_read(enc_dev_t *enc, const u8 addr)
+static u16 enc_phy_read(struct enc_device *enc, const u8 addr)
 {
 	uint64_t etime;
 	u8 status;
 
 	enc_w8(enc, CTL_REG_MIREGADR, addr);
 	enc_w8(enc, CTL_REG_MICMD, ENC_MICMD_MIIRD);
+
 	/* 1 second timeout - only happens on hardware problem */
 	etime = get_ticks() + get_tbclk();
+
 	/* poll MISTAT.BUSY bit until operation is complete */
-	do
-	{
+	do {
 		status = enc_r8(enc, CTL_REG_MISTAT);
 	} while (get_ticks() <= etime && (status & ENC_MISTAT_BUSY));
+
 	if (status & ENC_MISTAT_BUSY) {
-		printf("%s: timeout reading phy\n", enc->dev->name);
+		pr_info("%s (%s): timeout reading phy\n", __func__, enc->name);
 		return 0;
 	}
+
 	enc_w8(enc, CTL_REG_MICMD, 0);
 	return enc_r16(enc, CTL_REG_MIRDL);
 }
@@ -326,22 +340,24 @@ static u16 enc_phy_read(enc_dev_t *enc, const u8 addr)
 /*
  * Write PHY register
  */
-static void enc_phy_write(enc_dev_t *enc, const u8 addr, const u16 data)
+static void enc_phy_write(struct enc_device *enc, const u8 addr, const u16 data)
 {
 	uint64_t etime;
 	u8 status;
 
 	enc_w8(enc, CTL_REG_MIREGADR, addr);
 	enc_w16(enc, CTL_REG_MIWRL, data);
+
 	/* 1 second timeout - only happens on hardware problem */
 	etime = get_ticks() + get_tbclk();
+
 	/* poll MISTAT.BUSY bit until operation is complete */
-	do
-	{
+	do {
 		status = enc_r8(enc, CTL_REG_MISTAT);
 	} while (get_ticks() <= etime && (status & ENC_MISTAT_BUSY));
+
 	if (status & ENC_MISTAT_BUSY) {
-		printf("%s: timeout writing phy\n", enc->dev->name);
+		pr_info("%s (%s): timeout writing phy\n", __func__, enc->name);
 		return;
 	}
 }
@@ -353,7 +369,7 @@ static void enc_phy_write(enc_dev_t *enc, const u8 addr, const u16 data)
  * half/full duplex is a pure setup matter. For the time being, this driver
  * will setup in half duplex mode only.
  */
-static int enc_phy_link_wait(enc_dev_t *enc)
+static int enc_phy_link_wait(struct enc_device *enc)
 {
 	u16 status;
 	int duplex;
@@ -374,22 +390,22 @@ static int enc_phy_link_wait(enc_dev_t *enc)
 			/* now we have a link */
 			status = enc_phy_read(enc, PHY_REG_PHSTAT2);
 			duplex = (status & ENC_PHSTAT2_DPXSTAT) ? 1 : 0;
-			printf("%s: link up, 10Mbps %s-duplex\n",
-				enc->dev->name, duplex ? "full" : "half");
+			pr_info("%s (%s): link up, 10Mbps %s-duplex\n",
+				__func__, enc->name, duplex ? "full" : "half");
 			return 0;
 		}
 		udelay(1000);
 	}
 
 	/* timeout occurred */
-	printf("%s: link down\n", enc->dev->name);
+	pr_err("%s (%s): link down\n", __func__, enc->name);
 	return 1;
 }
 
 /*
  * This function resets the receiver only.
  */
-static void enc_reset_rx(enc_dev_t *enc)
+static void enc_reset_rx(struct enc_device *enc)
 {
 	u8 econ1;
 
@@ -403,7 +419,7 @@ static void enc_reset_rx(enc_dev_t *enc)
 /*
  * Reset receiver and reenable it.
  */
-static void enc_reset_rx_call(enc_dev_t *enc)
+static void enc_reset_rx_call(struct enc_device *enc)
 {
 	enc_bclr(enc, CTL_REG_ECON1, ENC_ECON1_RXRST);
 	enc_bset(enc, CTL_REG_ECON1, ENC_ECON1_RXEN);
@@ -413,7 +429,7 @@ static void enc_reset_rx_call(enc_dev_t *enc)
  * Copy a packet from the receive ring and forward it to
  * the protocol stack.
  */
-static void enc_receive(enc_dev_t *enc)
+static void enc_receive(struct enc_device *enc)
 {
 	u8 *packet = (u8 *)net_rx_packets[0];
 	u16 pkt_len;
@@ -429,8 +445,8 @@ static void enc_receive(enc_dev_t *enc)
 		enc->next_pointer = hbuf[0] | (hbuf[1] << 8);
 		pkt_len = hbuf[2] | (hbuf[3] << 8);
 		status = hbuf[4] | (hbuf[5] << 8);
-		debug("next_pointer=$%04x pkt_len=%u status=$%04x\n",
-			enc->next_pointer, pkt_len, status);
+		pr_debug("%s (%s): next_pointer=$%04x pkt_len=%u status=$%04x\n",
+			__func__, enc->name, enc->next_pointer, pkt_len, status);
 		if (pkt_len <= ENC_MAX_FRM_LEN)
 			copy_len = pkt_len;
 		else
@@ -459,14 +475,16 @@ static void enc_receive(enc_dev_t *enc)
 		} else {
 			enc_w16(enc, CTL_REG_ERXRDPTL, rxbuf_rdpt);
 		}
+
 		/* read pktcnt */
 		pkt_cnt = enc_r8(enc, CTL_REG_EPKTCNT);
 		if (copy_len == 0) {
 			(void)enc_r8(enc, CTL_REG_EIR);
 			enc_reset_rx(enc);
-			printf("%s: receive copy_len=0\n", enc->dev->name);
+			pr_info("%s (%s): receive copy_len = 0\n", __func__, enc->name);
 			continue;
 		}
+
 		/*
 		 * Because net_process_received_packet() might call enc_send(),
 		 * we need to release the SPI bus, call
@@ -484,7 +502,7 @@ static void enc_receive(enc_dev_t *enc)
 /*
  * Poll for completely received packets.
  */
-static void enc_poll(enc_dev_t *enc)
+static void enc_poll(struct enc_device *enc)
 {
 	u8 eir_reg;
 	u8 pkt_cnt;
@@ -495,12 +513,14 @@ static void enc_poll(enc_dev_t *enc)
 		/* clear TXIF bit in EIR */
 		enc_bclr(enc, CTL_REG_EIR, ENC_EIR_TXIF);
 	}
+
 	/* We have to use pktcnt and not pktif bit, see errata pt. 6 */
 	pkt_cnt = enc_r8(enc, CTL_REG_EPKTCNT);
 	if (pkt_cnt > 0) {
 		if ((eir_reg & ENC_EIR_PKTIF) == 0) {
-			debug("enc_poll: pkt cnt > 0, but pktif not set\n");
+			pr_debug("%s (%s): enc_poll: pkt cnt > 0, but pktif not set\n", __func__, enc->name);
 		}
+
 		enc_receive(enc);
 		/*
 		 * clear PKTIF bit in EIR, this should not need to be done
@@ -508,12 +528,14 @@ static void enc_poll(enc_dev_t *enc)
 		 */
 		enc_bclr(enc, CTL_REG_EIR, ENC_EIR_PKTIF);
 	}
+
 	if (eir_reg & ENC_EIR_RXERIF) {
-		printf("%s: rx error\n", enc->dev->name);
+		pr_info("%s (%s): rx error\n", __func__, enc->name);
 		enc_bclr(enc, CTL_REG_EIR, ENC_EIR_RXERIF);
 	}
+
 	if (eir_reg & ENC_EIR_TXERIF) {
-		printf("%s: tx error\n", enc->dev->name);
+		pr_info("%s (%s): tx error\n", __func__, enc->name);
 		enc_bclr(enc, CTL_REG_EIR, ENC_EIR_TXERIF);
 	}
 }
@@ -521,14 +543,14 @@ static void enc_poll(enc_dev_t *enc)
 /*
  * Completely Reset the ENC
  */
-static void enc_reset(enc_dev_t *enc)
+static void enc_reset(struct enc_device *enc)
 {
 	u8 dout[1];
 
 	dout[0] = CMD_SRC;
-	spi_xfer(enc->slave, 8, dout, NULL,
-		SPI_XFER_BEGIN | SPI_XFER_END);
-	/* sleep 1 ms. See errata pt. 2 */
+	spi_xfer(enc->slave, 8, dout, NULL, SPI_XFER_BEGIN | SPI_XFER_END);
+
+	/* sleep at least 1 ms. See errata pt. 2 */
 	udelay(1000);
 }
 
@@ -604,7 +626,7 @@ static const u16 enc_initdata[] = {
 /*
  * Wait for the XTAL oscillator to become ready
  */
-static int enc_clock_wait(enc_dev_t *enc)
+static int enc_clock_wait(struct enc_device *enc)
 {
 	uint64_t etime;
 
@@ -615,22 +637,24 @@ static int enc_clock_wait(enc_dev_t *enc)
 	 * Wait for CLKRDY to become set (i.e., check that we can
 	 * communicate with the ENC)
 	 */
-	do
-	{
+	do {
 		if (enc_r8(enc, CTL_REG_ESTAT) & ENC_ESTAT_CLKRDY)
 			return 0;
 	} while (get_ticks() <= etime);
 
-	printf("%s: timeout waiting for CLKRDY\n", enc->dev->name);
+	pr_info("%s (%s): timeout waiting for CLKRDY\n", __func__, enc->name);
 	return -1;
 }
 
 /*
  * Write the MAC address into the ENC
  */
-static int enc_write_macaddr(enc_dev_t *enc)
+static int enc_write_macaddr(struct enc_device *enc)
 {
-	unsigned char *p = enc->dev->enetaddr;
+	struct eth_pdata *pdata = dev_get_plat(enc->udev);
+	unsigned char *p = pdata->enetaddr;
+
+	pr_info("%s (%s): mac[%pM]\n", __func__, enc->name, p);
 
 	enc_w8_retry(enc, CTL_REG_MAADR5, *p++, 5);
 	enc_w8_retry(enc, CTL_REG_MAADR4, *p++, 5);
@@ -638,13 +662,14 @@ static int enc_write_macaddr(enc_dev_t *enc)
 	enc_w8_retry(enc, CTL_REG_MAADR2, *p++, 5);
 	enc_w8_retry(enc, CTL_REG_MAADR1, *p++, 5);
 	enc_w8_retry(enc, CTL_REG_MAADR0, *p, 5);
+
 	return 0;
 }
 
 /*
  * Setup most of the ENC registers
  */
-static int enc_setup(enc_dev_t *enc)
+static int enc_setup(struct enc_device *enc)
 {
 	u16 phid1 = 0;
 	u16 phid2 = 0;
@@ -659,8 +684,7 @@ static int enc_setup(enc_dev_t *enc)
 	phid1 = enc_phy_read(enc, PHY_REG_PHID1);
 	phid2 = enc_phy_read(enc, PHY_REG_PHID2) & ENC_PHID2_MASK;
 	if (phid1 != ENC_PHID1_VALUE || phid2 != ENC_PHID2_VALUE) {
-		printf("%s: failed to identify PHY. Found %04x:%04x\n",
-			enc->dev->name, phid1, phid2);
+		pr_info("%s (%s): failed to identify PHY. Found %04x:%04x\n", __func__, enc->name, phid1, phid2);
 		return -1;
 	}
 
@@ -693,7 +717,7 @@ static int enc_setup(enc_dev_t *enc)
  * If not, try to initialize it.
  * Remember initialized state in struct.
  */
-static int enc_initcheck(enc_dev_t *enc, const enum enc_initstate requiredstate)
+static int enc_initcheck(struct enc_device *enc, const enum enc_initstate requiredstate)
 {
 	if (enc->initstate >= requiredstate)
 		return 0;
@@ -701,48 +725,62 @@ static int enc_initcheck(enc_dev_t *enc, const enum enc_initstate requiredstate)
 	if (enc->initstate < setupdone) {
 		/* Initialize the ENC only */
 		enc_reset(enc);
-		/* if any of functions fails, skip the rest and return an error */
-		if (enc_clock_wait(enc) || enc_setup(enc) || enc_write_macaddr(enc)) {
+
+		if (enc_clock_wait(enc)) {
+			pr_err("%s (%s): failed enc_clock_wait\n", __func__, enc->name);
 			return -1;
 		}
+
+		if (enc_setup(enc)) {
+			pr_err("%s (%s): failed enc_setup\n", __func__, enc->name);
+			return -1;
+		}
+
+		if (enc_write_macaddr(enc)) {
+			pr_err("%s (%s): failed to enc_write_macaddr\n", __func__, enc->name);
+			return -1;
+		}
+
 		enc->initstate = setupdone;
 	}
+
 	/* if that's all we need, return here */
 	if (enc->initstate >= requiredstate)
 		return 0;
 
 	/* now wait for link ready condition */
 	if (enc_phy_link_wait(enc)) {
+		pr_err("%s (%s): failed enc_phy_link_wait\n", __func__, enc->name);
 		return -1;
 	}
+
 	enc->initstate = linkready;
 	return 0;
 }
 
 #if defined(CONFIG_CMD_MII)
+
 /*
  * Read a PHY register.
  *
  * This function is registered with miiphy_register().
  */
-int enc_miiphy_read(struct mii_dev *bus, int phy_adr, int devad, int reg)
+static int enc_miiphy_read(struct mii_dev *bus, int phy_adr, int devad, int reg)
 {
+	struct enc_device *enc = bus->priv;
 	u16 value = 0;
-	struct eth_device *dev = eth_get_dev_by_name(bus->name);
-	enc_dev_t *enc;
 
-	if (!dev || phy_adr != 0)
-		return -1;
-
-	enc = dev->priv;
 	if (enc_claim_bus(enc))
 		return -1;
+
 	if (enc_initcheck(enc, setupdone)) {
 		enc_release_bus(enc);
 		return -1;
 	}
+
 	value = enc_phy_read(enc, reg);
 	enc_release_bus(enc);
+
 	return value;
 }
 
@@ -754,23 +792,70 @@ int enc_miiphy_read(struct mii_dev *bus, int phy_adr, int devad, int reg)
 int enc_miiphy_write(struct mii_dev *bus, int phy_adr, int devad, int reg,
 		     u16 value)
 {
-	struct eth_device *dev = eth_get_dev_by_name(bus->name);
-	enc_dev_t *enc;
+	struct enc_device *enc = bus->priv;
 
-	if (!dev || phy_adr != 0)
-		return -1;
-
-	enc = dev->priv;
 	if (enc_claim_bus(enc))
 		return -1;
+
 	if (enc_initcheck(enc, setupdone)) {
 		enc_release_bus(enc);
 		return -1;
 	}
+
 	enc_phy_write(enc, reg, value);
 	enc_release_bus(enc);
+
 	return 0;
 }
+
+static int enc28j60_mdio_init(struct udevice *dev)
+{
+	struct enc_device *enc = dev_get_priv(dev);
+	struct mii_dev *bus;
+	int ret;
+
+	bus = mdio_alloc();
+	if (!bus) {
+		pr_err("%s (%s): failed to allocate mdio bus\n", __func__, enc->name);
+		return -ENOMEM;
+	}
+
+	strncpy(bus->name, dev->name, MDIO_NAME_LEN);
+	bus->read = enc_miiphy_read;
+	bus->write = enc_miiphy_write;
+	bus->priv = enc;
+
+	ret = mdio_register(bus);
+	if (ret) {
+		mdio_free(bus);
+		return ret;
+	}
+
+	enc->mdio = bus;
+
+	return 0;
+}
+
+static void enc28j60_mdio_deinit(struct udevice *dev)
+{
+	struct enc_device *enc = dev_get_priv(dev);
+
+	mdio_unregister(enc->mdio);
+	mdio_free(enc->mdio);
+}
+
+#else
+
+static int enc28j60_mdio_init(struct udevice *dev)
+{
+	return 0;
+}
+
+static void enc28j60_mdio_deinit(struct udevice *dev)
+{
+	return;
+}
+
 #endif
 
 /*
@@ -778,16 +863,16 @@ int enc_miiphy_write(struct mii_dev *bus, int phy_adr, int devad, int reg,
  *
  * This function entered into eth_device structure.
  */
-static int enc_write_hwaddr(struct eth_device *dev)
+static int enc_write_hwaddr(struct enc_device *enc)
 {
-	enc_dev_t *enc = dev->priv;
-
 	if (enc_claim_bus(enc))
 		return -1;
+
 	if (enc_initcheck(enc, setupdone)) {
 		enc_release_bus(enc);
 		return -1;
 	}
+
 	enc_release_bus(enc);
 	return 0;
 }
@@ -797,19 +882,21 @@ static int enc_write_hwaddr(struct eth_device *dev)
  *
  * This function entered into eth_device structure.
  */
-static int enc_init(struct eth_device *dev, bd_t *bis)
+static int enc_init(struct enc_device *enc)
 {
-	enc_dev_t *enc = dev->priv;
-
 	if (enc_claim_bus(enc))
 		return -1;
+
 	if (enc_initcheck(enc, linkready)) {
+		pr_err("%s (%s): failed to init device\n", __func__, enc->name);
 		enc_release_bus(enc);
 		return -1;
 	}
+
 	/* enable receive */
 	enc_bset(enc, CTL_REG_ECON1, ENC_ECON1_RXEN);
 	enc_release_bus(enc);
+
 	return 0;
 }
 
@@ -818,22 +905,24 @@ static int enc_init(struct eth_device *dev, bd_t *bis)
  *
  * This function entered into eth_device structure.
  */
-static int enc_recv(struct eth_device *dev)
+static int enc_recv(struct enc_device *enc)
 {
-	enc_dev_t *enc = dev->priv;
-
 	if (enc_claim_bus(enc))
 		return -1;
+
 	if (enc_initcheck(enc, linkready)) {
 		enc_release_bus(enc);
 		return -1;
 	}
+
 	/* Check for dead receiver */
 	if (enc->rx_reset_counter > 0)
 		enc->rx_reset_counter--;
 	else
 		enc_reset_rx_call(enc);
+
 	enc_poll(enc);
+
 	enc_release_bus(enc);
 	return 0;
 }
@@ -846,25 +935,24 @@ static int enc_recv(struct eth_device *dev)
  * Should we wait here until we have a Link? Or shall we leave that to
  * protocol retries?
  */
-static int enc_send(
-	struct eth_device *dev,
-	void *packet,
-	int length)
+static int enc_send(struct enc_device *enc, void *packet, int length)
 {
-	enc_dev_t *enc = dev->priv;
-
 	if (enc_claim_bus(enc))
 		return -1;
+
 	if (enc_initcheck(enc, linkready)) {
 		enc_release_bus(enc);
 		return -1;
 	}
+
 	/* setup transmit pointers */
 	enc_w16(enc, CTL_REG_EWRPTL, ENC_TX_BUF_START);
 	enc_w16(enc, CTL_REG_ETXNDL, length + ENC_TX_BUF_START);
 	enc_w16(enc, CTL_REG_ETXSTL, ENC_TX_BUF_START);
+
 	/* write packet to ENC */
-	enc_wbuf(enc, length, (u8 *) packet, 0x00);
+	enc_wbuf(enc, length, (u8 *)packet, 0x00);
+
 	/*
 	 * Check that the internal transmit logic has not been altered
 	 * by excessive collisions. Reset transmitter if so.
@@ -874,10 +962,13 @@ static int enc_send(
 		enc_bset(enc, CTL_REG_ECON1, ENC_ECON1_TXRST);
 		enc_bclr(enc, CTL_REG_ECON1, ENC_ECON1_TXRST);
 	}
+
 	enc_bclr(enc, CTL_REG_EIR, (ENC_EIR_TXERIF | ENC_EIR_TXIF));
+
 	/* start transmitting */
 	enc_bset(enc, CTL_REG_ECON1, ENC_ECON1_TXRTS);
 	enc_release_bus(enc);
+
 	return 0;
 }
 
@@ -886,10 +977,8 @@ static int enc_send(
  *
  * This function entered into eth_device structure.
  */
-static void enc_halt(struct eth_device *dev)
+static void enc_halt(struct enc_device *enc)
 {
-	enc_dev_t *enc = dev->priv;
-
 	if (enc_claim_bus(enc))
 		return;
 	/* Just disable receiver */
@@ -897,63 +986,128 @@ static void enc_halt(struct eth_device *dev)
 	enc_release_bus(enc);
 }
 
-/*
- * This is the only exported function.
- *
- * It may be called several times with different bus:cs combinations.
- */
-int enc28j60_initialize(unsigned int bus, unsigned int cs,
-	unsigned int max_hz, unsigned int mode)
+/* */
+
+static int enc28j60_bind(struct udevice *dev)
 {
-	struct eth_device *dev;
-	enc_dev_t *enc;
+	__maybe_unused struct enc_device *enc = dev_get_priv(dev);
 
-	/* try to allocate, check and clear eth_device object */
-	dev = malloc(sizeof(*dev));
-	if (!dev) {
-		return -1;
-	}
-	memset(dev, 0, sizeof(*dev));
-
-	/* try to allocate, check and clear enc_dev_t object */
-	enc = malloc(sizeof(*enc));
-	if (!enc) {
-		free(dev);
-		return -1;
-	}
-	memset(enc, 0, sizeof(*enc));
-
-	/* try to setup the SPI slave */
-	enc->slave = spi_setup_slave(bus, cs, max_hz, mode);
-	if (!enc->slave) {
-		printf("enc28j60: invalid SPI device %i:%i\n", bus, cs);
-		free(enc);
-		free(dev);
-		return -1;
-	}
-
-	enc->dev = dev;
-	/* now fill the eth_device object */
-	dev->priv = enc;
-	dev->init = enc_init;
-	dev->halt = enc_halt;
-	dev->send = enc_send;
-	dev->recv = enc_recv;
-	dev->write_hwaddr = enc_write_hwaddr;
-	sprintf(dev->name, "enc%i.%i", bus, cs);
-	eth_register(dev);
-#if defined(CONFIG_CMD_MII)
-	int retval;
-	struct mii_dev *mdiodev = mdio_alloc();
-	if (!mdiodev)
-		return -ENOMEM;
-	strncpy(mdiodev->name, dev->name, MDIO_NAME_LEN);
-	mdiodev->read = enc_miiphy_read;
-	mdiodev->write = enc_miiphy_write;
-
-	retval = mdio_register(mdiodev);
-	if (retval < 0)
-		return retval;
-#endif
 	return 0;
 }
+
+static int enc28j60_of_to_plat(struct udevice *dev)
+{
+	struct enc_device *enc = dev_get_priv(dev);
+
+	enc->slave = dev_get_parent_priv(dev);
+	if (!enc->slave) {
+		pr_err("%s: failed to detect spi parent\n", __func__);
+		return -EINVAL;
+	}
+
+	enc->udev = dev;
+
+	return 0;
+}
+
+static int enc28j60_probe(struct udevice *dev)
+{
+	struct enc_device *enc = dev_get_priv(dev);
+	int ret;
+
+	enc->name = dev->name;
+
+	/* TODO: really check the chip, e.g. read ChipRev */
+
+	ret = enc28j60_mdio_init(dev);
+	if (ret) {
+		pr_err("%s (%s): failed to initialize mdiobus: %d\n", __func__, enc->name, ret);
+		goto out;
+	}
+
+out:
+	return ret;
+}
+
+static int enc28j60_start(struct udevice *dev)
+{
+	struct enc_device * enc = dev_get_priv(dev);
+
+	return enc_init(enc);
+}
+
+static int enc28j60_send(struct udevice *dev, void *packet, int len)
+{
+	struct enc_device *enc = dev_get_priv(dev);
+
+	return enc_send(enc, packet, len);
+}
+
+static int enc28j60_recv(struct udevice *dev, int flags, uchar **packetp)
+{
+	struct enc_device *enc = dev_get_priv(dev);
+	int ret;
+
+	ret = enc_recv(enc);
+
+	return ret >= 0 ? ret : -EAGAIN;
+}
+
+static void enc28j60_stop(struct udevice *dev)
+{
+	struct enc_device *enc = dev_get_priv(dev);
+
+	enc_halt(enc);
+}
+
+static int enc28j60_free_pkt(struct udevice *dev, uchar *packet, int length)
+{
+	__maybe_unused struct enc_device *enc = dev_get_priv(dev);
+
+	return 0;
+}
+
+static int enc28j60_write_hwaddr(struct udevice *dev)
+{
+	struct enc_device *enc = dev_get_priv(dev);
+
+	enc_write_hwaddr(enc);
+
+	return 0;
+}
+
+static int enc28j60_remove(struct udevice *dev)
+{
+	__maybe_unused struct enc_device *priv = dev_get_priv(dev);
+
+	enc28j60_mdio_deinit(dev);
+
+	return 0;
+}
+
+static const struct eth_ops enc28j60_ops = {
+	.start	        = enc28j60_start,
+	.send	        = enc28j60_send,
+	.recv	        = enc28j60_recv,
+	.stop	        = enc28j60_stop,
+	.free_pkt       = enc28j60_free_pkt,
+	.write_hwaddr	= enc28j60_write_hwaddr,
+};
+
+static const struct udevice_id enc28j60_ids[] = {
+	{ .compatible = "microchip,enc28j60" },
+	{ }
+};
+
+U_BOOT_DRIVER(enc28j60) = {
+	.name = "enc28j60",
+	.id = UCLASS_ETH,
+	.of_match = enc28j60_ids,
+	.bind	= enc28j60_bind,
+	.of_to_plat = enc28j60_of_to_plat,
+	.probe = enc28j60_probe,
+	.remove = enc28j60_remove,
+	.ops = &enc28j60_ops,
+	.priv_auto = sizeof(struct enc_device),
+	.plat_auto = sizeof(struct eth_pdata),
+};

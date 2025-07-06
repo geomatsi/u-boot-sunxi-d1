@@ -309,6 +309,7 @@ config EEPRO100
 
 config ENC28J60
 	bool "ENC28J60 SPI Ethernet support"
+	depends on DM_SPI
 	help
 	  TODO
 
