@@ -14,7 +14,7 @@
 	compatible = "widora,mangopi-mq-pro", "allwinner,sun20i-d1";
 
 	aliases {
-		ethernet0 = &rtl8723ds;
+		ethernet0 = &enc28j60;
 		serial0 = &uart0;
 	};
 
@@ -139,4 +139,17 @@
 &usbphy {
 	usb1_vbus-supply = <&reg_vcc>;
 	status = "okay";
+};
+
+&spi1 {
+	pinctrl-0 = <&spi1_pins>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	enc28j60: ethernet@0 {
+		compatible = "microchip,enc28j60";
+		reg = <0>;
+		spi-max-frequency = <1000000>;
+		status = "okay";
+	};
 };
